@@ -64,7 +64,7 @@
   "devDependencies": {
     "@aws-sdk/credential-provider-node": "^3.972.95",
     "@eslint/js": "^10.0.1",
-    "@strapi/design-system": "2.2.4",
+    "@strapi/design-system": "2.3.0",
     "@strapi/icons": "2.2.4",
     "@strapi/sdk-plugin": "^6.1.1",
     "@strapi/strapi": "^5.61.1",
