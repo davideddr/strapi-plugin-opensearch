@@ -1,6 +1,6 @@
 {
   "name": "@davideddr/strapi-plugin-opensearch",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OpenSearch integration for Strapi 5: real-time indexing of published content and a controlled search endpoint.",
   "keywords": [
     "strapi",

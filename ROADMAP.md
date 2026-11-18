@@ -34,7 +34,6 @@ Planned work after `1.0.0`, grouped by target version. Versions and scope may ch
   operators.
 - **Typo tolerance**: configurable `fuzziness` (e.g. `AUTO`) on the full-text query.
 - **Autocomplete**: `search_as_you_type` on selected fields and a `GET /suggest/:index` endpoint.
-- **Multi-index search**: `/search?indices=article,page`, each hit tagged with its index.
 - **Field selection**: `fields` to limit the fields returned in each hit.
 
 ## 0.5 — Advanced configuration UI

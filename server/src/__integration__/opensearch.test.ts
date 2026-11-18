@@ -437,4 +437,65 @@ describe.skipIf(!reachable)('integration — OpenSearch', () => {
       expect(result.data.map((d: { documentId: string }) => d.documentId)).toEqual(['p1']);
     });
   });
+
+  describe('multi-index search', () => {
+    beforeAll(async () => {
+      env.save(PAGE, 'p2', null, { title: 'Notizie e aggiornamenti' });
+      await env.service('indexer').indexOne(PAGE, 'p2', null);
+      await refresh(alias('pages'));
+    });
+
+    const multi = (query: Record<string, unknown>) => env.service('search').multiSearch(query);
+    const ids = (data: { _index: string; documentId: string }[]) => data.map((d) => `${d._index}:${d.documentId}`);
+
+    it('ranks hits of several indices in one list, each tagged with its index name', async () => {
+      const result = await multi({ indices: 'article,pages', q: 'notizie' });
+      // r1, r3, r5 ("notizia sportiva", italian stemmer) + p2 (standard analyzer, exact word).
+      expect(result.meta.pagination.total).toBe(4);
+      expect(ids(result.data).sort()).toEqual(['article:r1', 'article:r3', 'article:r5', 'pages:p2']);
+      expect(result.data.every((d: { _score: number }) => d._score > 0)).toBe(true);
+    });
+
+    it('restricts each clause to its alias (the _index term matches alias names)', async () => {
+      // If `_index` did not match alias names no clause would match and the result would be empty.
+      const result = await multi({ indices: 'pages,article', q: 'siamo' });
+      expect(ids(result.data)).toEqual(['pages:p1']);
+    });
+
+    it('applies the locale to the localized indices only', async () => {
+      const result = await multi({ indices: 'article,pages', q: 'cooking', locale: 'en' });
+      expect(ids(result.data)).toEqual(['article:r2']);
+      await expect(multi({ indices: 'article,pages', locale: 'de' })).rejects.toBeInstanceOf(SearchParamsError);
+    });
+
+    it('paginates the combined list and highlights the fields of each index', async () => {
+      const page2 = await multi({
+        indices: 'article,pages',
+        q: 'notizie',
+        pageSize: '3',
+        page: '2',
+        highlight: 'true',
+      });
+      expect(page2.data).toHaveLength(1);
+      expect(page2.meta.pagination).toMatchObject({ total: 4, pageCount: 2 });
+      expect(Object.keys(page2.data[0]._highlight).length).toBeGreaterThan(0);
+    });
+
+    it('group=true returns one result set per index', async () => {
+      const result = await multi({ indices: 'pages,article', q: 'notizie', group: 'true' });
+      expect(Object.keys(result.data)).toEqual(['pages', 'article']);
+      expect(result.data.pages.meta.pagination.total).toBe(1);
+      expect(result.data.article.meta.pagination.total).toBe(3);
+    });
+
+    it('allows only filters shared by every index and requires indices', async () => {
+      await expect(multi({ indices: 'article,pages', filters: { tags: 'sport' } })).rejects.toBeInstanceOf(
+        SearchParamsError,
+      );
+      const sport = await multi({ indices: 'article', filters: { tags: 'sport' } });
+      expect(sport.meta.pagination.total).toBe(3);
+      await expect(multi({ q: 'x' })).rejects.toBeInstanceOf(SearchParamsError);
+      await expect(multi({ indices: 'article,missing' })).rejects.toBeInstanceOf(UnknownIndexError);
+    });
+  });
 });

@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-18
+
+### Added
+
+- Multi-index search `GET /api/opensearch/search?indices=a,b` for site-wide search, on the same
+  `search` permission: one list ranked across indices with each hit tagged by `_index`, or one
+  result set per index with `group=true` (single `msearch`). Each index keeps its own
+  `search.fields` and boosts; `filters` and `sort` are limited to the fields allowed on every
+  requested index; `locale` applies to the localized indices only.
+
 ## [1.0.0] - 2026-11-11
 
 First release.
@@ -27,4 +37,5 @@ First release.
   last result, in English and Italian.
 - Unit tests and integration tests against a real OpenSearch container.
 
+[1.1.0]: https://github.com/davideddr/strapi-plugin-opensearch/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/davideddr/strapi-plugin-opensearch/releases/tag/v1.0.0
