@@ -122,12 +122,12 @@ const parseSort = (value: unknown, sortable: string[]): SearchParams['sort'] => 
   return sort;
 };
 
-const parseHighlight = (value: unknown): boolean => {
+const parseFlag = (name: string, value: unknown): boolean => {
   // `?highlight` with no value is `null` (Strapi parses the query string with strictNullHandling).
   if (value === undefined) return false;
   if (value === null || value === 'true') return true;
   if (value === 'false') return false;
-  throw new SearchParamsError('"highlight" must be "true" or "false"');
+  throw new SearchParamsError(`"${name}" must be "true" or "false"`);
 };
 
 /** Validates the query string against the content type whitelist. Throws `SearchParamsError`. */
@@ -160,7 +160,7 @@ export const parseSearchParams = (query: unknown, limits: SearchLimits): SearchP
     sort: parseSort(params.sort, limits.sortable),
     page,
     pageSize,
-    highlight: parseHighlight(params.highlight),
+    highlight: parseFlag('highlight', params.highlight),
   };
 };
 
@@ -190,17 +190,25 @@ export interface SearchBodyInput {
   resolveField?: (field: string) => string;
 }
 
-export const buildSearchBody = ({ params, fields, resolveField = (f) => f }: SearchBodyInput): PlainObject => {
-  const must = params.q
-    ? [{ multi_match: { query: params.q, fields, type: 'best_fields', lenient: true } }]
-    : [{ match_all: {} }];
+type FieldResolver = (field: string) => string;
 
-  const filter = Object.entries(params.filters).map(([field, values]) =>
+const textQuery = (q: string, fields: string[]): PlainObject[] =>
+  q ? [{ multi_match: { query: q, fields, type: 'best_fields', lenient: true } }] : [{ match_all: {} }];
+
+const filterClauses = (filters: SearchParams['filters'], resolveField: FieldResolver): PlainObject[] =>
+  Object.entries(filters).map(([field, values]) =>
     values.length === 1 ? { term: { [resolveField(field)]: values[0] } } : { terms: { [resolveField(field)]: values } },
   );
 
+/** Pagination, sort and highlight: the part of the body shared by the single and multi-index search. */
+const finishBody = (
+  query: PlainObject,
+  params: SearchParams,
+  highlightFields: string[],
+  resolveSortField: FieldResolver,
+): PlainObject => {
   const body: PlainObject = {
-    query: { bool: { must, filter } },
+    query,
     from: (params.page - 1) * params.pageSize,
     size: params.pageSize,
     track_total_hits: true,
@@ -211,7 +219,7 @@ export const buildSearchBody = ({ params, fields, resolveField = (f) => f }: Sea
       field === '_score'
         ? { _score: { order } }
         : // `unmapped_type`: no error on an index where no document has the field yet.
-          { [resolveField(field)]: { order, unmapped_type: 'keyword' } },
+          { [resolveSortField(field)]: { order, unmapped_type: 'keyword' } },
     );
     // Sorting by a field drops `_score` unless asked for.
     if (params.q) body.track_scores = true;
@@ -221,14 +229,66 @@ export const buildSearchBody = ({ params, fields, resolveField = (f) => f }: Sea
     body.highlight = {
       // Escapes the source text: highlights are safe to render as HTML (only <em> is markup).
       encoder: 'html',
-      fields: Object.fromEntries(fields.map((f) => [stripBoost(f), {}])),
+      fields: Object.fromEntries([...new Set(highlightFields.map(stripBoost))].map((f) => [f, {}])),
     };
   }
 
   return body;
 };
 
+export const buildSearchBody = ({ params, fields, resolveField = (f) => f }: SearchBodyInput): PlainObject =>
+  finishBody(
+    { bool: { must: textQuery(params.q, fields), filter: filterClauses(params.filters, resolveField) } },
+    params,
+    fields,
+    resolveField,
+  );
+
+export interface MultiSearchTarget {
+  /** Alias searched (`{prefix}_{indexName}[_{locale}]`). */
+  alias: string;
+  /** `search.fields` of its content type, with boosts. */
+  fields: string[];
+  /** Filter field resolution on this alias (see `resolveKeywordField`). */
+  resolveField?: FieldResolver;
+}
+
+export interface MultiSearchBodyInput {
+  params: SearchParams;
+  targets: MultiSearchTarget[];
+  /** Sort field resolution, shared by every target. */
+  resolveSortField?: FieldResolver;
+}
+
+/**
+ * One query over several aliases, ranked together. Each alias gets its own clause (restricted with
+ * `_index`, which also matches alias names) so that its own `search.fields` and boosts apply, and
+ * its own keyword resolution for the filters.
+ */
+export const buildMultiSearchBody = ({
+  params,
+  targets,
+  resolveSortField = (f) => f,
+}: MultiSearchBodyInput): PlainObject =>
+  finishBody(
+    {
+      bool: {
+        should: targets.map(({ alias, fields, resolveField = (f) => f }) => ({
+          bool: {
+            must: textQuery(params.q, fields),
+            filter: [{ term: { _index: alias } }, ...filterClauses(params.filters, resolveField)],
+          },
+        })),
+        minimum_should_match: 1,
+      },
+    },
+    params,
+    targets.flatMap((t) => t.fields),
+    resolveSortField,
+  );
+
 interface SearchHit {
+  _index?: string;
   _source?: PlainObject;
   _score?: number | null;
   highlight?: Record<string, string[]>;
@@ -243,12 +303,21 @@ export interface SearchResult {
   meta: { pagination: { page: number; pageSize: number; pageCount: number; total: number } };
 }
 
-export const formatSearchResponse = (body: SearchResponseBody, params: SearchParams): SearchResult => {
+/**
+ * `indexOf` (multi-index search) maps the physical index of a hit to the public index name, added
+ * as `_index`.
+ */
+export const formatSearchResponse = (
+  body: SearchResponseBody,
+  params: SearchParams,
+  indexOf?: (physicalIndex: string) => string | undefined,
+): SearchResult => {
   const rawTotal = body.hits.total;
   const total = typeof rawTotal === 'number' ? rawTotal : (rawTotal?.value ?? 0);
   return {
     data: body.hits.hits.map((hit) => ({
       ...(hit._source ?? {}),
+      ...(indexOf ? { _index: indexOf(hit._index ?? '') ?? null } : {}),
       _score: hit._score ?? null,
       ...(params.highlight ? { _highlight: hit.highlight ?? {} } : {}),
     })),
@@ -262,3 +331,53 @@ export const formatSearchResponse = (body: SearchResponseBody, params: SearchPar
     },
   };
 };
+
+// ---------------------------------------------------------------------------------------------
+// Multi-index search (`GET /search?indices=a,b`)
+// ---------------------------------------------------------------------------------------------
+
+export const MULTI_ALLOWED_PARAMS = [...ALLOWED_PARAMS, 'indices', 'group'] as const;
+
+export interface MultiSearchQuery {
+  /** Public index names (`indexName`), deduplicated, in the requested order. */
+  indices: string[];
+  /** `true`: one result set per index instead of a single ranked list. */
+  group: boolean;
+  /** The remaining parameters, to validate with `parseSearchParams`. */
+  query: PlainObject;
+}
+
+/** `indices=article,page` or `indices[]=article&indices[]=page`. Required. */
+export const parseIndices = (value: unknown): string[] => {
+  const required = () => new SearchParamsError('"indices" is required: one or more index names, comma separated');
+  if (value === undefined || value === null) throw required();
+  const items = Array.isArray(value) ? value : [value];
+  if (!items.every((item) => typeof item === 'string')) {
+    throw new SearchParamsError('"indices" must be index names, comma separated');
+  }
+  const names = (items as string[])
+    .flatMap((item) => item.split(','))
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (names.length === 0) throw required();
+  return [...new Set(names)];
+};
+
+/**
+ * Splits the multi-index query string: `indices` and `group` here, the rest is validated with
+ * `parseSearchParams` once the limits of the requested indices are known.
+ */
+export const parseMultiSearchQuery = (query: unknown): MultiSearchQuery => {
+  const { indices, group, ...rest } = isPlainObject(query) ? query : ({} as PlainObject);
+  const unknown = Object.keys(rest).filter((key) => !(ALLOWED_PARAMS as readonly string[]).includes(key));
+  if (unknown.length > 0) {
+    throw new SearchParamsError(`Parameter not allowed: ${unknown.join(', ')}`, {
+      allowed: [...MULTI_ALLOWED_PARAMS],
+    });
+  }
+  return { indices: parseIndices(indices), group: parseFlag('group', group), query: rest };
+};
+
+/** Values present in every list (filterable / sortable fields allowed on all the requested indices). */
+export const intersect = (lists: string[][]): string[] =>
+  lists.length === 0 ? [] : lists.reduce((acc, list) => acc.filter((value) => list.includes(value)));

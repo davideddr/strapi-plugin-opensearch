@@ -123,18 +123,18 @@ yet, and it does not support every API the plugin uses (see [Known limitations](
 
 Each key of `contentTypes` is a content type uid. Only configured content types are indexed.
 
-| Option              | Default            | Description                                                                                                           |
-| ------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `indexName`         | `singularName`     | Name used in the alias and in the search URL (`/search/:indexName`).                                                  |
-| `locales`           | `'all'`            | `'all'` or a list of locale codes (`['it', 'en']`). Ignored when i18n is off for the content type.                    |
-| `populate`          | none               | `populate` passed to the Document Service when loading an entry (relations, media, components).                       |
-| `filter`            | —                  | `(entry, { uid, locale }) => boolean \| Promise<boolean>`: `false` excludes the entry (it is removed from the index). |
-| `transform`         | entry without `id` | `(entry, { uid, locale }) => object \| Promise<object>`: the document to index.                                       |
-| `mappings`          | dynamic            | Explicit index mappings, merged with the base mapping.                                                                |
-| `settings`          | language analyzer  | Index settings, deep-merged over the defaults (e.g. a custom `analysis`).                                             |
-| `search.fields`     | — (required)       | Fields of the full-text query, with optional boosts (`title^3`).                                                      |
-| `search.filterable` | `[]`               | Fields accepted in `filters[...]`.                                                                                    |
-| `search.sortable`   | `[]`               | Fields accepted in `sort` (`_score` is always allowed).                                                               |
+| Option              | Default            | Description                                                                                                             |
+| ------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `indexName`         | `singularName`     | Name used in the alias, in the search URL (`/search/:indexName`) and in `indices` / `_index` of the multi-index search. |
+| `locales`           | `'all'`            | `'all'` or a list of locale codes (`['it', 'en']`). Ignored when i18n is off for the content type.                      |
+| `populate`          | none               | `populate` passed to the Document Service when loading an entry (relations, media, components).                         |
+| `filter`            | —                  | `(entry, { uid, locale }) => boolean \| Promise<boolean>`: `false` excludes the entry (it is removed from the index).   |
+| `transform`         | entry without `id` | `(entry, { uid, locale }) => object \| Promise<object>`: the document to index.                                         |
+| `mappings`          | dynamic            | Explicit index mappings, merged with the base mapping.                                                                  |
+| `settings`          | language analyzer  | Index settings, deep-merged over the defaults (e.g. a custom `analysis`).                                               |
+| `search.fields`     | — (required)       | Fields of the full-text query, with optional boosts (`title^3`).                                                        |
+| `search.filterable` | `[]`               | Fields accepted in `filters[...]`.                                                                                      |
+| `search.sortable`   | `[]`               | Fields accepted in `sort` (`_score` is always allowed).                                                                 |
 
 **Index naming.** Alias `{indexPrefix}_{indexName}_{locale}` (or `{indexPrefix}_{indexName}` without
 i18n), pointing to a physical index `{alias}_v{timestamp}`. The document `_id` is the Strapi
@@ -223,6 +223,77 @@ curl -G 'http://localhost:1337/api/opensearch/search/article' \
 }
 ```
 
+### Multi-index search
+
+```
+GET /api/opensearch/search?indices=article,pages
+```
+
+Searches several content types with one call, for a site-wide search box. Same permission as the
+single-index endpoint (_Opensearch → search_). It accepts every parameter above, plus:
+
+| Parameter | Description                                                                                                                         |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `indices` | **Required.** `indexName`s to search, comma separated (`indices=article,pages`) or repeated (`indices[]=…`). Unknown name: **404**. |
+| `group`   | `true`: one result set per index instead of a single list (see below).                                                              |
+
+- **One ranked list** (default): hits of every index sorted together by `_score` (or by `sort`),
+  with a single pagination. Each hit has `_index`, the `indexName` it comes from, to choose the
+  link or card to render. Each index is searched on its own `search.fields` and boosts.
+- **`filters` and `sort`** are allowed only on fields that are `filterable` / `sortable` in
+  **every** requested index (`error.details.allowed` lists them). `_score` is always allowed.
+- **`locale`** applies to the localized indices and is ignored by the others. A localized index
+  without that locale returns 400, as on the single-index endpoint.
+- **`highlight`** covers the search fields of every requested index.
+
+```bash
+curl -G 'http://localhost:1337/api/opensearch/search' \
+  -d indices=article,pages --data-urlencode 'q=ricetta' -d locale=it -d pageSize=10 -d highlight=true
+```
+
+```json
+{
+  "data": [
+    {
+      "documentId": "k2v7…",
+      "locale": "it",
+      "title": "Ricetta della carbonara",
+      "_index": "article",
+      "_score": 7.31,
+      "_highlight": { "title": ["<em>Ricetta</em> della carbonara"] }
+    },
+    {
+      "documentId": "p9a1…",
+      "locale": null,
+      "title": "Ricette di stagione",
+      "_index": "pages",
+      "_score": 3.02,
+      "_highlight": { "title": ["<em>Ricette</em> di stagione"] }
+    }
+  ],
+  "meta": { "pagination": { "page": 1, "pageSize": 10, "pageCount": 1, "total": 2 } }
+}
+```
+
+With `group=true` the response has one entry per index, in the order of `indices`, each with the
+same shape as the single-index endpoint; `page` and `pageSize` apply to each group (useful for
+"Articles (12) · Pages (3)" with the first results of each):
+
+```json
+{
+  "data": {
+    "article": {
+      "data": [{ "documentId": "k2v7…", "title": "Ricetta della carbonara", "_score": 7.31 }],
+      "meta": { "pagination": { "page": 1, "pageSize": 3, "pageCount": 4, "total": 12 } }
+    },
+    "pages": {
+      "data": [{ "documentId": "p9a1…", "title": "Ricette di stagione", "_score": 3.02 }],
+      "meta": { "pagination": { "page": 1, "pageSize": 3, "pageCount": 1, "total": 3 } }
+    }
+  }
+}
+```
+
 ### Example of integration from Nuxt app
 
 ```ts
@@ -268,6 +339,30 @@ const { data, status } = await useArticleSearch(q, page);
 Debounce `q` in a real search box, and set the query only from fields of your own UI: the endpoint
 rejects anything outside the whitelist anyway.
 
+A site-wide search on several content types, rendering each hit by its `_index`:
+
+```ts
+// composables/useSiteSearch.ts
+export const useSiteSearch = (q: Ref<string>, page: Ref<number>) => {
+  const config = useRuntimeConfig();
+  const { locale } = useI18n();
+
+  return useFetch('/api/opensearch/search', {
+    baseURL: config.public.strapiUrl,
+    query: { indices: 'article,pages', q, locale, page, pageSize: 10, highlight: true },
+    watch: [q, page, locale],
+  });
+};
+```
+
+```vue
+<li v-for="hit in data?.data" :key="`${hit._index}:${hit.documentId}`">
+  <NuxtLink :to="hit._index === 'article' ? `/blog/${hit.slug}` : `/${hit.slug}`">
+    <span v-html="hit._highlight?.title?.[0] ?? hit.title" />
+  </NuxtLink>
+</li>
+```
+
 ## Admin panel and permissions
 
 _Settings → OpenSearch → Indices_ shows the cluster connection, and for every content type and
@@ -310,6 +405,10 @@ without stopping the swap. Starting a reindex of a content type already being re
   is logged and not retried: run a reindex after the outage.
 - **Only published content** is indexed: there is no search on drafts.
 - **Sorting on `text` fields** needs a `.keyword` sub-field (present with dynamic mapping).
+- **Multi-index ranking is approximate.** Scores are computed per index (term statistics differ
+  between content types), so a single ranked list across indices is good for a site search but
+  not exact; tune the boosts of `search.fields` if one content type dominates. Sorting on a field
+  mapped differently in the requested indices (e.g. `text` in one, `date` in another) returns 400.
 - **OpenSearch Serverless** (`service: 'aoss'`) is untested; it does not support every API used
   here (e.g. manual `_refresh`), so reindex may not work there. AWS SigV4 on OpenSearch Service is
   implemented with the official client signer but has not been tested against a real domain yet.

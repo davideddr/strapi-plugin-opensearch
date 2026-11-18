@@ -6,6 +6,13 @@ export default () => ({
   type: 'content-api',
   routes: [
     {
+      // Multi-index search: `?indices=article,page` (required), same action as `/search/:index`.
+      method: 'GET',
+      path: '/search',
+      handler: 'search.search',
+      config: { policies: [] },
+    },
+    {
       method: 'GET',
       path: '/search/:index',
       handler: 'search.search',

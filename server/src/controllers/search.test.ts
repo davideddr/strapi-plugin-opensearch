@@ -4,14 +4,14 @@ import routes from '../routes/content-api';
 import { SearchParamsError, UnknownIndexError } from '../utils/search-query';
 
 const setup = (impl: () => Promise<unknown>) => {
-  const searchService = { search: vi.fn(impl) };
+  const searchService = { search: vi.fn(impl), multiSearch: vi.fn(impl) };
   const strapi = {
     plugin: () => ({ service: () => searchService }),
     log: { error: vi.fn() },
   };
   const ctx = {
     params: { index: 'article' },
-    query: { q: 'x' },
+    query: { q: 'x' } as Record<string, unknown>,
     body: undefined as unknown,
     badRequest: vi.fn(),
     notFound: vi.fn(),
@@ -26,6 +26,17 @@ describe('search controller', () => {
     const { controller, searchService, ctx } = setup(async () => result);
     await controller.search(ctx);
     expect(searchService.search).toHaveBeenCalledWith('article', { q: 'x' });
+    expect(ctx.body).toBe(result);
+  });
+
+  it('runs the multi-index search when there is no :index', async () => {
+    const result = { data: [], meta: {} };
+    const { controller, searchService, ctx } = setup(async () => result);
+    ctx.params = {} as never;
+    ctx.query = { indices: 'article,page', q: 'x' };
+    await controller.search(ctx);
+    expect(searchService.multiSearch).toHaveBeenCalledWith({ indices: 'article,page', q: 'x' });
+    expect(searchService.search).not.toHaveBeenCalled();
     expect(ctx.body).toBe(result);
   });
 
@@ -57,10 +68,11 @@ describe('search controller', () => {
 });
 
 describe('content-api routes', () => {
-  it('exposes GET /search/:index with the default auth (Users & Permissions)', () => {
+  it('exposes GET /search and /search/:index on one action, with the default auth (Users & Permissions)', () => {
     const { type, routes: list } = routes();
     expect(type).toBe('content-api');
     expect(list).toEqual([
+      { method: 'GET', path: '/search', handler: 'search.search', config: { policies: [] } },
       { method: 'GET', path: '/search/:index', handler: 'search.search', config: { policies: [] } },
     ]);
   });

@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_QUERY_LENGTH,
   SearchParamsError,
+  buildMultiSearchBody,
   buildSearchBody,
   formatSearchResponse,
+  intersect,
+  parseIndices,
+  parseMultiSearchQuery,
   parseSearchParams,
   resolveKeywordField,
   stripBoost,
@@ -226,5 +230,129 @@ describe('formatSearchResponse', () => {
       pageCount: 0,
       total: 0,
     });
+  });
+});
+
+describe('parseIndices', () => {
+  it('reads comma separated or repeated names, trimmed and deduplicated', () => {
+    expect(parseIndices('article, page,article')).toEqual(['article', 'page']);
+    expect(parseIndices(['article', 'page,faq'])).toEqual(['article', 'page', 'faq']);
+  });
+
+  it('is required', () => {
+    for (const value of [undefined, null, '', ' , ', []]) {
+      expect(() => parseIndices(value)).toThrow(/"indices" is required/);
+    }
+    expect(() => parseIndices({ a: 'x' })).toThrow(/"indices" must be/);
+  });
+});
+
+describe('parseMultiSearchQuery', () => {
+  it('splits indices and group from the other parameters', () => {
+    expect(parseMultiSearchQuery({ indices: 'article,page', group: 'true', q: 'x', page: '2' })).toEqual({
+      indices: ['article', 'page'],
+      group: true,
+      query: { q: 'x', page: '2' },
+    });
+    expect(parseMultiSearchQuery({ indices: 'article' }).group).toBe(false);
+    expect(parseMultiSearchQuery({ indices: 'article', group: null }).group).toBe(true);
+  });
+
+  it('rejects unknown parameters listing the multi-index ones, and a bad group', () => {
+    expect(() => parseMultiSearchQuery({ indices: 'a', populate: '*' })).toThrow(/Parameter not allowed: populate/);
+    try {
+      parseMultiSearchQuery({ indices: 'a', size: '1' });
+    } catch (error) {
+      expect((error as SearchParamsError).details.allowed).toEqual(expect.arrayContaining(['indices', 'group']));
+    }
+    expect(() => parseMultiSearchQuery({ indices: 'a', group: 'yes' })).toThrow(/"group"/);
+    expect(() => parseMultiSearchQuery({})).toThrow(/"indices" is required/);
+  });
+});
+
+describe('intersect', () => {
+  it('keeps the values present in every list', () => {
+    expect(
+      intersect([
+        ['a', 'b', 'c'],
+        ['c', 'a'],
+        ['a', 'c', 'd'],
+      ]),
+    ).toEqual(['a', 'c']);
+    expect(intersect([['a'], []])).toEqual([]);
+    expect(intersect([])).toEqual([]);
+  });
+});
+
+describe('buildMultiSearchBody', () => {
+  const targets = [
+    { alias: 'strapi_article_it', fields: ['title^3', 'body'], resolveField: (f: string) => `${f}.keyword` },
+    { alias: 'strapi_page', fields: ['title', 'content'] },
+  ];
+
+  it('gives each alias its own clause with its fields and filters', () => {
+    const body = buildMultiSearchBody({
+      params: parse({ q: 'ciao', filters: { tags: 'a' }, page: '2', pageSize: '5' }),
+      targets,
+    });
+    expect(body).toEqual({
+      query: {
+        bool: {
+          should: [
+            {
+              bool: {
+                must: [
+                  { multi_match: { query: 'ciao', fields: ['title^3', 'body'], type: 'best_fields', lenient: true } },
+                ],
+                filter: [{ term: { _index: 'strapi_article_it' } }, { term: { 'tags.keyword': 'a' } }],
+              },
+            },
+            {
+              bool: {
+                must: [
+                  { multi_match: { query: 'ciao', fields: ['title', 'content'], type: 'best_fields', lenient: true } },
+                ],
+                filter: [{ term: { _index: 'strapi_page' } }, { term: { tags: 'a' } }],
+              },
+            },
+          ],
+          minimum_should_match: 1,
+        },
+      },
+      from: 5,
+      size: 5,
+      track_total_hits: true,
+    });
+  });
+
+  it('uses match_all without q, the shared sort resolver and the union of highlight fields', () => {
+    const body = buildMultiSearchBody({
+      params: parse({ sort: 'publishedAt:desc', highlight: 'true' }),
+      targets,
+      resolveSortField: (f) => `${f}!`,
+    });
+    const should = (body.query as { bool: { should: { bool: { must: unknown } }[] } }).bool.should;
+    expect(should.map((clause) => clause.bool.must)).toEqual([[{ match_all: {} }], [{ match_all: {} }]]);
+    expect(body.sort).toEqual([{ 'publishedAt!': { order: 'desc', unmapped_type: 'keyword' } }]);
+    expect(body.highlight).toEqual({ encoder: 'html', fields: { title: {}, body: {}, content: {} } });
+  });
+});
+
+describe('formatSearchResponse with indexOf', () => {
+  it('tags every hit with the public index name', () => {
+    const body = {
+      hits: {
+        total: 2,
+        hits: [
+          { _index: 'strapi_article_it_v1', _source: { documentId: 'a' }, _score: 2 },
+          { _index: 'other_v1', _source: { documentId: 'b' }, _score: 1 },
+        ],
+      },
+    };
+    const names: Record<string, string> = { strapi_article_it_v1: 'article' };
+    expect(formatSearchResponse(body, parse({}), (index) => names[index]).data).toEqual([
+      { documentId: 'a', _index: 'article', _score: 2 },
+      { documentId: 'b', _index: null, _score: 1 },
+    ]);
   });
 });
