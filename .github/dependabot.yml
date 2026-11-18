@@ -5,6 +5,24 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # The admin runs inside Strapi's own React tree: these dev dependencies are pinned to the
+    # versions Strapi ships (see @strapi/admin's package.json) and are bumped by hand together
+    # with @strapi/strapi, never on their own.
+    ignore:
+      - dependency-name: '@strapi/design-system'
+      - dependency-name: '@strapi/icons'
+      - dependency-name: react-intl
+        update-types: ['version-update:semver-major']
+      - dependency-name: react
+        update-types: ['version-update:semver-major']
+      - dependency-name: react-dom
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@types/react'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@types/react-dom'
+        update-types: ['version-update:semver-major']
+      - dependency-name: react-router-dom
+        update-types: ['version-update:semver-major']
   - package-ecosystem: github-actions
     directory: /
     schedule:
